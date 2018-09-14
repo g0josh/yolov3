@@ -4,16 +4,10 @@ from __future__ import division, print_function
 
 import torch
 import torch.nn as nn
-# import torch.functional as F
 import numpy as np
-# import cv2
 
 from utils import transform_prediction, get_test_input
 
-# class DetectionLayer(nn.Module):
-#     def __init__(self, anchors):
-#         super(DetectionLayer, self).__init__()
-#         self.anchors = anchors
 
 class EmptyLayer(nn.Module):
     def __init__(self):
@@ -23,12 +17,22 @@ class EmptyLayer(nn.Module):
         return x
 
 
-class YoloV3(nn.Module):
+class RouteLayer(nn.Module):
+    def __init__(self):
+        super(RouteLayer, self).__init__()
+        self.layers = []
+
+    def forward(self, x):
+        return x
+
+
+class Darknet(nn.Module):
     """
-    A PyTorch implementation of Yolo v3 which was implemented in Darknet by the Author
+    A PyTorch implementation of Darknet
+    WIP: Contains only layers in YOLOv3
     """
     def __init__(self, cfg_file, color_img = True):
-        super(YoloV3, self).__init__()
+        super(Darknet, self).__init__()
         self.default_image_depth = 3 if color_img else 1
         self.blocks = self.parseCfg(cfg_file)
         self.net_info, self.module_list = self.makeModules(self.blocks)
@@ -194,17 +198,18 @@ class YoloV3(nn.Module):
 
             elif block["type"] == "upsample":
                 stride = int(block["stride"])
-                upsample = nn.Upsample(scale_factor = stride, mode = "neares")
+                upsample = nn.Upsample(scale_factor = stride, mode = "nearest")
                 module.add_module("upsample_{}".format(index), upsample)
             elif block['type'] == 'route':
                 # Update filters so that convolutional layer can use it in the future
                 module.add_module("{}_{}".format(block['type'], index), EmptyLayer())
                 layer_indices = [int(x.strip()) for x in block['layers'].split(',')]
-                filters = filters_list[layer_indices[0]] if layer_indices[0] > 0 else layer_indices[0]+index                           
+                filters = filters_list[layer_indices[0]] if layer_indices[0] > 0 else filters_list[layer_indices[0]+index] 
+                print ("layer indices = {}, filters = {}".format(layer_indices, filters))
                 for layer_index in layer_indices[1:]:
                     filters += filters_list[layer_index] if layer_index > 0 else filters_list[index+layer_index]
                 print ("index = {}, filter = {}".format(index, filters))
-            elif block["type"] in ["shortcut", "route", 'yolo']:
+            elif block["type"] in ['shortcut', 'yolo']:
                 module.add_module("{}_{}".format(block['type'], index), EmptyLayer())
 
             # elif block["type"] == "yolo":
@@ -222,7 +227,7 @@ class YoloV3(nn.Module):
 
     def forward(self, x, CUDA):
         features_per_layer = []
-        detections = []
+        detections = torch.FloatTensor()
         for index, block in enumerate(self.blocks[1:]):
             print ("Index = {}, type = {}, input shape = {}".format(index, block['type'], x.shape))
             if block['type'] in ['convolutional', 'upsample']:
@@ -248,17 +253,18 @@ class YoloV3(nn.Module):
                 num_classes = int (block["classes"])
                 detection = transform_prediction(x, inp_dim, anchors, num_classes, CUDA)
                 if type(detection) == int:
-                    print ("No detections")
                     continue
-                if not detections:
-                    print("got 1st detection")
+                # If first detection
+                if detections.shape == (0,):
                     detections = detection
                 else:
-                    print ("concatenated preds")
                     detections = torch.cat((detections, detection), 1)
             else:
                 print ("unknown blocks - {}".format(block['type']))
+
             features_per_layer.append(x)
+
+        return detections
 
 """
 Testing with a sample image
@@ -266,7 +272,7 @@ Testing with a sample image
 if __name__ == '__main__':
     inp = get_test_input('images/dog-cycle-car.png')
     print ("Inp shape = {}".format(inp.shape))
-    dnn = YoloV3('cfg/yolov3.cfg')
+    dnn = Darknet('cfg/yolov3.cfg')
     # print ("Module list = {}".format(dnn.module_list))
     dnn.load_weights('yolov3.weights')
     CUDA = torch.cuda.is_available()

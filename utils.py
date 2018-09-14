@@ -13,8 +13,8 @@ def get_test_input(img_path):
 
 def transform_prediction(prediction, inp_dim, anchors, num_classes, CUDA = True):
     batch_size = prediction.size(0)
-    stride =  inp_dim // prediction.size(2)
-    grid_size = inp_dim // stride
+    grid_size = prediction.size(2)
+    stride =  inp_dim // grid_size
     bbox_attrs = 5 + num_classes
     num_anchors = len(anchors)
     
