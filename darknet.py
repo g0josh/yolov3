@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from utils import transform_prediction, get_test_input
+from utils import transform_prediction, prep_image, write_results
 
 
 class EmptyLayer(nn.Module):
@@ -36,6 +36,73 @@ class Darknet(nn.Module):
         self.default_image_depth = 3 if color_img else 1
         self.blocks = self.parseCfg(cfg_file)
         self.net_info, self.module_list = self.makeModules(self.blocks)
+
+    def loadWeights(self, weights_file):
+
+        with open(weights_file, 'rb') as f:
+            #The first 4 values are header information 
+            # 1. Major version number
+            # 2. Minor Version Number
+            # 3. Subversion number 
+            # 4. Images seen 
+            header = np.fromfile(f, dtype = np.int32, count = 5)
+            self.header = torch.from_numpy(header)
+            self.nb_images_seen = self.header[3]
+            
+            #The rest of the values are the weights
+            weights = np.fromfile(f, dtype = np.float32)
+
+        print ("Loading weights - {}".format(weights_file))
+        # Keep track of the last index loaded
+        weights_ptr = 0
+        for index, block in enumerate(self.blocks):
+            if block['type'] == "convolutional":
+                model = self.module_list[index]
+                bn = int(block['batch_normalize']) if 'batch_normalize' in block else 0
+
+                # seq module w/ batch norm
+                # module[0] -> conv
+                # module[1] -> batch norm
+                # module[2] -> activation
+
+                # seq module w/o batch norm
+                # module[0] -> conv
+                # module[1] -> activation
+
+                if bn:
+                    bn_layer = model[1]
+
+                    # Get weights in bn layer
+                    nb_bn_layer_biases = bn_layer.bias.numel()
+
+                    # Load weights
+                    bn_layer_biases = torch.from_numpy(weights[bn_layer: weights_ptr + num_bn_biases])
+                    weights_ptr += nb_bn_layer_biases
+
+                    bn_layer_weights = torch.from_numpy(weights[weights_ptr: weights_ptr + num_bn_biases])
+                    weights_ptr += nb_bn_layer_biases
+                    
+                    bn_layer_running_mean = torch.from_numpy(weights[weights_ptr: weights_ptr + num_bn_biases])
+                    weights_ptr += nb_bn_layer_biases
+                    
+                    bn_layer_running_var = torch.from_numpy(weights[weights_ptr: weights_ptr + num_bn_biases])
+                    weights_ptr += nb_bn_layer_biases
+
+                    #Cast the loaded weights into dims of model weights. 
+                    bn_layer_biases = bn_layer_biases.view_as(bn_layer.bias.data)
+                    bn_layer_weights = bn_layer_weights.view_as(bn_layer.weight.data)
+                    bn_layer_running_mean = bn_layer_running_mean.view_as(bn_layer.running_mean)
+                    bn_layer_running_var = bn_layer_running_var.view_as(bn_layer.running_var)
+
+                    #Copy the data to model
+                    bn_layer.bias.data.copy_(bn_layer_biases)
+                    bn_layer.weight.data.copy_(bn_layer_weights)
+                    bn_layer.running_mean.copy_(bn_layer_running_mean)
+                    bn_layer.running_var.copy_(bn_layer_running_var)
+
+
+
+            
 
     def load_weights(self, weightfile):
         
@@ -205,10 +272,10 @@ class Darknet(nn.Module):
                 module.add_module("{}_{}".format(block['type'], index), EmptyLayer())
                 layer_indices = [int(x.strip()) for x in block['layers'].split(',')]
                 filters = filters_list[layer_indices[0]] if layer_indices[0] > 0 else filters_list[layer_indices[0]+index] 
-                print ("layer indices = {}, filters = {}".format(layer_indices, filters))
+                # print ("layer indices = {}, filters = {}".format(layer_indices, filters))
                 for layer_index in layer_indices[1:]:
                     filters += filters_list[layer_index] if layer_index > 0 else filters_list[index+layer_index]
-                print ("index = {}, filter = {}".format(index, filters))
+                # print ("index = {}, filter = {}".format(index, filters))
             elif block["type"] in ['shortcut', 'yolo']:
                 module.add_module("{}_{}".format(block['type'], index), EmptyLayer())
 
@@ -229,7 +296,6 @@ class Darknet(nn.Module):
         features_per_layer = []
         detections = torch.FloatTensor()
         for index, block in enumerate(self.blocks[1:]):
-            print ("Index = {}, type = {}, input shape = {}".format(index, block['type'], x.shape))
             if block['type'] in ['convolutional', 'upsample']:
                 x = self.module_list[index](x)
             elif block['type'] == 'route':
@@ -251,7 +317,7 @@ class Darknet(nn.Module):
                 inp_dim = int (self.net_info["height"])
                 #Get the number of classes
                 num_classes = int (block["classes"])
-                detection = transform_prediction(x, inp_dim, anchors, num_classes, CUDA)
+                detection = transform_prediction(x.data, inp_dim, anchors, num_classes, CUDA)
                 if type(detection) == int:
                     continue
                 # If first detection
@@ -270,19 +336,23 @@ class Darknet(nn.Module):
 Testing with a sample image
 """
 if __name__ == '__main__':
-    inp = get_test_input('images/dog-cycle-car.png')
-    print ("Inp shape = {}".format(inp.shape))
+    inp = prep_image('images/dog.jpg', 416)
     dnn = Darknet('cfg/yolov3.cfg')
     # print ("Module list = {}".format(dnn.module_list))
     dnn.load_weights('yolov3.weights')
     CUDA = torch.cuda.is_available()
     if CUDA:
         dnn.cuda()
-        inp = inp.cuda()
+        inp = inp[0].cuda()
     dnn.eval()
-    pred = dnn(inp, CUDA)
+    print ("inp = {}\nshape = {}".format(inp, inp.shape))
+    with torch.no_grad():
+        pred = dnn(inp, CUDA)
     print ("prediction = {}\nshape = {}".format(pred, pred.shape))
-    
+    with open("/home/cbarobotics/dev/pred.t", 'wb') as f:
+        torch.save(pred, f)
+    res = write_results(pred, 0.5, 80)
+    print ("res = {}\nshape = {}".format(res, res.shape))
 
                 
 
